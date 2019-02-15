@@ -387,6 +387,8 @@ func (d *diskQueue) writeOne(data []byte) error {
 	d.writePos += totalBytes
 	atomic.AddInt64(&d.depth, 1)
 
+	// 只检测下次写入的位置是否大于d.maxBytesPerFile，这样就保证任何一次写入的数据都是写入同一个文件的。
+	// 因此每个文件的实际大小与d.maxBytesPerFile没有关系。
 	if d.writePos > d.maxBytesPerFile {
 		d.writeFileNum++
 		d.writePos = 0
@@ -553,6 +555,7 @@ func (d *diskQueue) moveForward() {
 
 func (d *diskQueue) handleReadError() {
 	// jump to the next read file and rename the current (bad) file
+	// 读写的是同一个文件，读的时候发现文件损坏，所以也要换一个文件写。
 	if d.readFileNum == d.writeFileNum {
 		// if you can't properly read from the current write file it's safe to
 		// assume that something is fucked and we should skip the current file too
@@ -605,6 +608,7 @@ func (d *diskQueue) ioLoop() {
 
 	for {
 		// dont sync all the time :)
+		// 读写次数总和等于d.syncEvery才同步
 		if count == d.syncEvery {
 			d.needSync = true
 		}
@@ -617,12 +621,14 @@ func (d *diskQueue) ioLoop() {
 			count = 0
 		}
 
+		// 检测文件的有效性
 		if (d.readFileNum < d.writeFileNum) || (d.readPos < d.writePos) {
-			if d.nextReadPos == d.readPos {
+			if d.nextReadPos == d.readPos { // 表示之前取出的数据已经被外层消费了。确保被消费了才继续取，否则将会导致数据丢弃(见下面的select部分代码)。
 				dataRead, err = d.readOne()
 				if err != nil {
 					d.logf(ERROR, "DISKQUEUE(%s) reading at %d of %s - %s",
 						d.name, d.readPos, d.fileName(d.readFileNum), err)
+					// 如果出错，处理出错(换一个文件)，然后继续读取数据
 					d.handleReadError()
 					continue
 				}
